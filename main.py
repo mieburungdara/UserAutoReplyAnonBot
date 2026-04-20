@@ -20,11 +20,12 @@ client = TelegramClient(StringSession(config['session_string']), config['api_id'
 
 @client.on(events.NewMessage(from_users=[config['bot_username']], incoming=True))
 @client.on(events.MessageEdited(from_users=[config['bot_username']]))
+@client.on(events.MessageRead(func=lambda e: e.is_private))
 async def handler(event):
     try:
         text = event.message.text
         for trigger_name, trigger in config['triggers'].items():
-            pattern = re.compile(re.escape(trigger['pattern']), re.IGNORECASE)
+            pattern = re.compile(r'^' + re.escape(trigger['pattern']) + r'$', re.IGNORECASE | re.MULTILINE)
             if pattern.search(text):
                 if trigger['action'] == 'send_command':
                     try:
@@ -45,7 +46,10 @@ async def handler(event):
                         logger.warning(f"Flood wait: waiting {e.seconds}s")
                         await asyncio.sleep(e.seconds)
                         await event.reply(response)
-                break
+                 break
+        except AttributeError:
+            # Handle messages with no text (media only)
+            pass
     except Exception as e:
         logger.error(f"Error in handler: {e}")
 
