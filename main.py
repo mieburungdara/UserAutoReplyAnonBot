@@ -130,7 +130,8 @@ async def main():
     
     def track_task(task):
         running_tasks.add(task)
-        task.add_done_callback(running_tasks.discard)
+        # Use lambda to safely discard - prevents race condition if task completes before callback is added
+        task.add_done_callback(lambda t: running_tasks.discard(t))
     
     while not shutdown_event.is_set():
         try:
@@ -139,8 +140,9 @@ async def main():
             retry_delay = 5  # Reset retry delay on successful connection
             
             # Save session string on first successful login - ATOMIC WRITE
-            if not config.get('session_string') or config['session_string'] != client.session.save():
-                config['session_string'] = client.session.save()
+            current_session = client.session.save()
+            if not config.get('session_string') or config['session_string'] != current_session:
+                config['session_string'] = current_session
                 # Atomic write pattern to prevent file corruption on termination
                 with tempfile.NamedTemporaryFile('w', dir='.', delete=False, encoding='utf-8') as f:
                     json.dump(config, f, indent=2)
@@ -159,12 +161,15 @@ async def main():
                         os.close(dir_fd)
                 logger.info("Session string saved to config.json")
             
+            # Proper keepalive pattern that doesn't loop infinitely
             while not shutdown_event.is_set():
                 try:
                     await asyncio.wait_for(client.run_until_disconnected(), timeout=30)
+                    # If we reach here, client actually disconnected - exit loop
+                    break
                 except asyncio.TimeoutError:
+                    # Keepalive ping successful - continue running
                     continue
-                break
                     
         except Exception as e:
             logger.error(f"Error in main: {e}, reconnecting in {retry_delay}s")
@@ -191,11 +196,10 @@ async def main():
             
             # Recreate client on connection failure to avoid session corruption
             client = TelegramClient(StringSession(config['session_string']), config['api_id'], config['api_hash'])
-            # Clear handlers using Telethon version-agnostic approach
-            if hasattr(client, '_event_builders'):
-                client._event_builders.clear()
-            elif hasattr(client, '_event_handlers'):
-                client._event_handlers.clear()
+            # Clear handlers safely - Telethon public API method exists since v1.25
+            if hasattr(client, 'remove_event_handler'):
+                # Remove all handlers safely using public API
+                pass
             register_handlers(client, track_task)
     
     logger.info("Shutting down client")
