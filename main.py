@@ -25,7 +25,7 @@ def register_handlers(client, track_task=None):
             text = event.message.text
             for trigger_name, trigger in config['triggers'].items():
                 # Use \A and \Z anchors instead of ^$ to prevent line injection with MULTILINE
-                pattern = re.compile(r'\A' + re.escape(trigger['pattern']) + r'\Z', re.IGNORECASE)
+                pattern = re.compile(r'\A' + re.escape(trigger['pattern'].replace('\n', ' ')) + r'\Z', re.IGNORECASE | re.DOTALL)
                 if pattern.search(text):
                     async def send_with_backoff(action, max_retries=3):
                         for attempt in range(max_retries):
@@ -107,6 +107,10 @@ async def main():
                     f.flush()
                     os.fsync(f.fileno())
                 os.replace(f.name, 'config.json')
+                # Ensure directory entry is persisted
+                dir_fd = os.open('.', os.O_RDONLY)
+                os.fsync(dir_fd)
+                os.close(dir_fd)
                 logger.info("Session string saved to config.json")
             
             while not shutdown_event.is_set():
@@ -123,6 +127,9 @@ async def main():
             for task in running_tasks:
                 if not task.done():
                     task.cancel()
+            # Wait for all cancelled tasks to actually complete
+            await asyncio.gather(*running_tasks, return_exceptions=True)
+            running_tasks.clear()
             try:
                 await client.disconnect()
             except:
