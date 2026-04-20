@@ -17,12 +17,13 @@ if not config['session_string']:
 
 client = TelegramClient(StringSession(config['session_string']), config['api_id'], config['api_hash'])
 
-@client.on(events.NewMessage(from_users=[config['bot_username']]))
+@client.on(events.NewMessage(from_users=[config['bot_username']], incoming=True))
 async def handler(event):
     try:
         text = event.message.text
         for trigger_name, trigger in config['triggers'].items():
-            if re.search(trigger['pattern'], text):
+            pattern = re.compile(r'\b' + re.escape(trigger['pattern']) + r'\b', re.IGNORECASE)
+            if pattern.search(text):
                 if trigger['action'] == 'send_command':
                     await client.send_message(config['bot_username'], trigger['command'])
                     logger.info(f"Sent {trigger['command']} for trigger {trigger_name}")
@@ -36,21 +37,39 @@ async def handler(event):
     except Exception as e:
         logger.error(f"Error in handler: {e}")
 
+shutdown_event = asyncio.Event()
+
 def signal_handler(signum, frame):
     logger.info(f"Received signal {signum}, shutting down gracefully")
-    asyncio.create_task(client.disconnect())
-    sys.exit(0)
+    shutdown_event.set()
 
 signal.signal(signal.SIGTERM, signal_handler)
 signal.signal(signal.SIGINT, signal_handler)
 
 async def main():
-    try:
-        await client.start()
-        logger.info("Client started successfully")
-        await client.run_until_disconnected()
-    except Exception as e:
-        logger.error(f"Error in main: {e}")
+    retry_delay = 5
+    max_retry_delay = 300
+    
+    while not shutdown_event.is_set():
+        try:
+            await client.start()
+            logger.info("Client started successfully")
+            
+            while not shutdown_event.is_set():
+                try:
+                    await asyncio.wait_for(client.run_until_disconnected(), timeout=30)
+                except asyncio.TimeoutError:
+                    continue
+                break
+                    
+        except Exception as e:
+            logger.error(f"Error in main: {e}, reconnecting in {retry_delay}s")
+            await asyncio.sleep(retry_delay)
+            retry_delay = min(retry_delay * 2, max_retry_delay)
+    
+    logger.info("Shutting down client")
+    await client.disconnect()
+    logger.info("Client disconnected successfully")
 
 if __name__ == "__main__":
     asyncio.run(main())
