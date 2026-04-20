@@ -6,6 +6,7 @@ import signal
 import sys
 from loguru import logger
 from telethon import TelegramClient, events
+from telethon.errors import FloodWaitError
 from telethon.sessions import StringSession
 
 with open('config.json', 'r') as f:
@@ -18,21 +19,32 @@ if not config['session_string']:
 client = TelegramClient(StringSession(config['session_string']), config['api_id'], config['api_hash'])
 
 @client.on(events.NewMessage(from_users=[config['bot_username']], incoming=True))
+@client.on(events.MessageEdited(from_users=[config['bot_username']]))
 async def handler(event):
     try:
         text = event.message.text
         for trigger_name, trigger in config['triggers'].items():
-            pattern = re.compile(r'\b' + re.escape(trigger['pattern']) + r'\b', re.IGNORECASE)
+            pattern = re.compile(re.escape(trigger['pattern']), re.IGNORECASE)
             if pattern.search(text):
                 if trigger['action'] == 'send_command':
-                    await client.send_message(config['bot_username'], trigger['command'])
-                    logger.info(f"Sent {trigger['command']} for trigger {trigger_name}")
+                    try:
+                        await client.send_message(config['bot_username'], trigger['command'])
+                        logger.info(f"Sent {trigger['command']} for trigger {trigger_name}")
+                    except FloodWaitError as e:
+                        logger.warning(f"Flood wait: waiting {e.seconds}s")
+                        await asyncio.sleep(e.seconds)
+                        await client.send_message(config['bot_username'], trigger['command'])
                 elif trigger['action'] == 'random_response':
                     response = random.choice(config['responses'])
                     delay = random.uniform(config['delay_min'], config['delay_max'])
                     await asyncio.sleep(delay)
-                    await event.reply(response)
-                    logger.info(f"Replied with {response} after {delay:.2f}s delay for trigger {trigger_name}")
+                    try:
+                        await event.reply(response)
+                        logger.info(f"Replied with {response} after {delay:.2f}s delay for trigger {trigger_name}")
+                    except FloodWaitError as e:
+                        logger.warning(f"Flood wait: waiting {e.seconds}s")
+                        await asyncio.sleep(e.seconds)
+                        await event.reply(response)
                 break
     except Exception as e:
         logger.error(f"Error in handler: {e}")
