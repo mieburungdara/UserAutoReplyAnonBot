@@ -5,6 +5,8 @@ import random
 import re
 import signal
 import sys
+import tempfile
+import os
 from loguru import logger
 from telethon import TelegramClient, events
 from telethon.errors import FloodWaitError
@@ -125,9 +127,6 @@ def signal_handler(signum, frame):
 signal.signal(signal.SIGTERM, signal_handler)
 signal.signal(signal.SIGINT, signal_handler)
 
-import tempfile
-import os
-
 async def main():
     global loop, client
     loop = asyncio.get_running_loop()
@@ -173,9 +172,10 @@ async def main():
                     logger.info("Session string saved to config.json")
                 except Exception as e:
                     # Clean up temp file on any failure
-                    if temp_file and os.path.exists(temp_file):
+                    if temp_file:
                         try:
-                            os.unlink(temp_file)
+                            if os.path.exists(temp_file):
+                                os.unlink(temp_file)
                         except:
                             pass
                     logger.error(f"Failed to save session string: {e}")
