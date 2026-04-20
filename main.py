@@ -28,7 +28,8 @@ if not config['session_string']:
 # Make triggers immutable after compilation to prevent race conditions
 immutable_triggers = {}
 for trigger_name, trigger in config['triggers'].items():
-    pattern = re.compile(r'\A' + re.escape(trigger['pattern'].replace('\n', ' ')) + r'\Z', re.IGNORECASE)
+    # Allow optional whitespace at start/end, normalize newlines
+    pattern = re.compile(r'\A\s*' + re.escape(trigger['pattern'].replace('\n', ' ')) + r'\s*\Z', re.IGNORECASE)
     immutable_triggers[trigger_name] = {
         'pattern': trigger['pattern'],
         'action': trigger['action'],
@@ -41,42 +42,54 @@ config['triggers'] = immutable_triggers
 async def send_with_backoff(client, action, max_retries=3):
     for attempt in range(max_retries):
         try:
-            await action()
-            return True
+            return await action()
         except FloodWaitError as e:
             logger.warning(f"Flood wait (attempt {attempt+1}): waiting {e.seconds}s")
             await asyncio.sleep(e.seconds)
-    logger.error(f"Failed after {max_retries} flood wait attempts")
+        except Exception as e:
+            logger.error(f"Error in action (attempt {attempt+1}): {e}")
+            if attempt == max_retries - 1:
+                return False
+            await asyncio.sleep(1)
+    logger.error(f"Failed after {max_retries} attempts")
     return False
 
 def register_handlers(client, track_task=None):
     @client.on(events.NewMessage(from_users=[config['bot_username']], incoming=True, outgoing=False))
     @client.on(events.MessageEdited(from_users=[config['bot_username']], incoming=True, outgoing=False))
-    @client.on(events.MessageRead(from_users=[config['bot_username']]))
     async def handler(event):
         try:
             text = event.message.text
         except AttributeError:
             # Handle messages with no text (media only) - catch HERE where the error actually occurs
             return
+        
+        # Explicitly handle empty text / None to prevent regex TypeError
+        if not text:
+            return
         try:
             for trigger_name, trigger in config['triggers'].items():
-                if trigger['_compiled_pattern'].search(text):
+                if trigger['_compiled_pattern'].match(text):
                     if trigger['action'] == 'send_command':
                         task = asyncio.create_task(send_with_backoff(
                             client,
-                            lambda: client.send_message(config['bot_username'], trigger['command'])
+                            # Bind values immediately with default parameter to avoid closure late binding
+                            lambda cmd=trigger['command']: client.send_message(config['bot_username'], cmd)
                         ))
                         if track_task:
                             track_task(task)
                         logger.info(f"Sent {trigger['command']} for trigger {trigger_name}")
                     elif trigger['action'] == 'random_response':
+                        if not config['responses']:
+                            logger.warning(f"No responses configured for trigger {trigger_name}")
+                            break
                         response = random.choice(config['responses'])
-                        delay = random.uniform(config['delay_min'], config['delay_max'])
+                        delay = random.uniform(config.get('delay_min', 1), config.get('delay_max', 5))
                         await asyncio.sleep(delay)
                         task = asyncio.create_task(send_with_backoff(
                             client,
-                            lambda: event.reply(response)
+                            # Bind values immediately with default parameter to avoid closure late binding
+                            lambda evt=event, resp=response: evt.reply(resp)
                         ))
                         if track_task:
                             track_task(task)
@@ -164,7 +177,7 @@ async def main():
             await asyncio.sleep(0)
             # Wait for all cancelled tasks to actually complete
             await asyncio.gather(*running_tasks, return_exceptions=True)
-        running_tasks.clear()
+            running_tasks.clear()
             # Force garbage collection to prevent resource leaks
             gc.collect()
             
@@ -186,6 +199,14 @@ async def main():
             register_handlers(client, track_task)
     
     logger.info("Shutting down client")
+    
+    # Cancel all remaining running tasks before shutdown
+    for task in running_tasks:
+        if not task.done():
+            task.cancel()
+    await asyncio.gather(*running_tasks, return_exceptions=True)
+    running_tasks.clear()
+    
     await client.disconnect()
     logger.info("Client disconnected successfully")
 
