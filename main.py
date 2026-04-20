@@ -16,6 +16,11 @@ if not config['session_string']:
     print("Session string is empty. Run this script locally to generate the session string.")
     sys.exit(1)
 
+# Precompile all trigger patterns once at startup
+for trigger in config['triggers'].values():
+    pattern = re.compile(r'\A' + re.escape(trigger['pattern'].replace('\n', ' ')) + r'\Z', re.IGNORECASE | re.DOTALL)
+    trigger['_compiled_pattern'] = pattern
+
 def register_handlers(client, track_task=None):
     @client.on(events.NewMessage(from_users=[config['bot_username']], incoming=True, outgoing=False))
     @client.on(events.MessageEdited(from_users=[config['bot_username']], incoming=True, outgoing=False))
@@ -24,9 +29,7 @@ def register_handlers(client, track_task=None):
         try:
             text = event.message.text
             for trigger_name, trigger in config['triggers'].items():
-                # Use \A and \Z anchors instead of ^$ to prevent line injection with MULTILINE
-                pattern = re.compile(r'\A' + re.escape(trigger['pattern'].replace('\n', ' ')) + r'\Z', re.IGNORECASE | re.DOTALL)
-                if pattern.search(text):
+                if trigger['_compiled_pattern'].search(text):
                     async def send_with_backoff(action, max_retries=3):
                         for attempt in range(max_retries):
                             try:
@@ -42,6 +45,8 @@ def register_handlers(client, track_task=None):
                         task = asyncio.create_task(send_with_backoff(
                             lambda: client.send_message(config['bot_username'], trigger['command'])
                         ))
+                        if track_task:
+                            track_task(task)
                         logger.info(f"Sent {trigger['command']} for trigger {trigger_name}")
                     elif trigger['action'] == 'random_response':
                         response = random.choice(config['responses'])
@@ -50,14 +55,16 @@ def register_handlers(client, track_task=None):
                         task = asyncio.create_task(send_with_backoff(
                             lambda: event.reply(response)
                         ))
+                        if track_task:
+                            track_task(task)
                         logger.info(f"Replied with {response} after {delay:.2f}s delay for trigger {trigger_name}")
-                    
-                    if track_task:
-                        track_task(task)
                     break
             except AttributeError:
                 # Handle messages with no text (media only)
                 pass
+        except asyncio.CancelledError:
+            # Task was cancelled intentionally during shutdown/reconnect
+            raise
         except Exception as e:
             logger.error(f"Error in handler: {e}")
 
@@ -106,6 +113,8 @@ async def main():
                     json.dump(config, f, indent=2)
                     f.flush()
                     os.fsync(f.fileno())
+                # Small forced delay to ensure disk cache is committed
+                await asyncio.sleep(0.05)
                 os.replace(f.name, 'config.json')
                 # Ensure directory entry is persisted
                 dir_fd = os.open('.', os.O_RDONLY)
@@ -127,6 +136,8 @@ async def main():
             for task in running_tasks:
                 if not task.done():
                     task.cancel()
+            # Allow event loop one tick to process cancellation requests
+            await asyncio.sleep(0)
             # Wait for all cancelled tasks to actually complete
             await asyncio.gather(*running_tasks, return_exceptions=True)
             running_tasks.clear()
@@ -140,6 +151,8 @@ async def main():
             
             # Recreate client on connection failure to avoid session corruption
             client = TelegramClient(StringSession(config['session_string']), config['api_id'], config['api_hash'])
+            # Clear all existing handlers before registering new ones
+            client._event_builders.clear()
             register_handlers(client, track_task)
     
     logger.info("Shutting down client")
