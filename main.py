@@ -151,23 +151,34 @@ async def main():
             current_session = client.session.save()
             if not config.get('session_string') or config['session_string'] != current_session:
                 config['session_string'] = current_session
-                # Atomic write pattern to prevent file corruption on termination
-                with tempfile.NamedTemporaryFile('w', dir='.', delete=False, encoding='utf-8') as f:
-                    json.dump(config, f, indent=2)
-                    f.flush()
-                    os.fsync(f.fileno())
-                # Small forced delay to ensure disk cache is committed
-                await asyncio.sleep(0.05)
-                os.replace(f.name, 'config.json')
-                # Ensure directory entry is persisted
-                dir_fd = None
+                temp_file = None
                 try:
-                    dir_fd = os.open('.', os.O_RDONLY)
-                    os.fsync(dir_fd)
-                finally:
-                    if dir_fd is not None:
-                        os.close(dir_fd)
-                logger.info("Session string saved to config.json")
+                    # Atomic write pattern to prevent file corruption on termination
+                    with tempfile.NamedTemporaryFile('w', dir='.', delete=False, encoding='utf-8') as f:
+                        temp_file = f.name
+                        json.dump(config, f, indent=2)
+                        f.flush()
+                        os.fsync(f.fileno())
+                    # Small forced delay to ensure disk cache is committed
+                    await asyncio.sleep(0.05)
+                    os.replace(f.name, 'config.json')
+                    # Ensure directory entry is persisted
+                    dir_fd = None
+                    try:
+                        dir_fd = os.open('.', os.O_RDONLY)
+                        os.fsync(dir_fd)
+                    finally:
+                        if dir_fd is not None:
+                            os.close(dir_fd)
+                    logger.info("Session string saved to config.json")
+                except Exception as e:
+                    # Clean up temp file on any failure
+                    if temp_file and os.path.exists(temp_file):
+                        try:
+                            os.unlink(temp_file)
+                        except:
+                            pass
+                    logger.error(f"Failed to save session string: {e}")
             
             # Proper keepalive pattern that doesn't loop infinitely
             while not shutdown_event.is_set():
@@ -209,12 +220,11 @@ async def main():
             retry_delay = min(max(retry_delay * 2, 5), max_retry_delay)
             
             # Recreate client on connection failure to avoid session corruption
-            client = TelegramClient(StringSession(config['session_string']), config['api_id'], config['api_hash'])
-            # Clear handlers safely - Telethon public API method exists since v1.25
-            if hasattr(client, 'remove_event_handler'):
-                # Remove all handlers safely using public API
-                pass
-            register_handlers(client, track_task)
+            new_client = TelegramClient(StringSession(config['session_string']), config['api_id'], config['api_hash'])
+            # Register handlers BEFORE assigning to global to prevent race condition
+            register_handlers(new_client, track_task)
+            # Atomic assignment - client is only visible globally
+            client = new_client
     
     logger.info("Shutting down client")
     
