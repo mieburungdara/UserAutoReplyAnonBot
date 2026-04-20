@@ -18,8 +18,8 @@ if not config['session_string']:
 
 client = TelegramClient(StringSession(config['session_string']), config['api_id'], config['api_hash'])
 
-@client.on(events.NewMessage(from_users=[config['bot_username']], incoming=True))
-@client.on(events.MessageEdited(from_users=[config['bot_username']], incoming=True))
+@client.on(events.NewMessage(from_users=[config['bot_username']], incoming=True, outgoing=False))
+@client.on(events.MessageEdited(from_users=[config['bot_username']], incoming=True, outgoing=False))
 @client.on(events.MessageRead(func=lambda e: e.is_private))
 async def handler(event):
     try:
@@ -90,6 +90,8 @@ async def main():
             logger.error(f"Error in main: {e}, reconnecting in {retry_delay}s")
             await asyncio.sleep(retry_delay)
             retry_delay = min(retry_delay * 2, max_retry_delay)
+            # Recreate client on connection failure to avoid session corruption
+            client = TelegramClient(StringSession(config['session_string']), config['api_id'], config['api_hash'])
     
     logger.info("Shutting down client")
     await client.disconnect()
