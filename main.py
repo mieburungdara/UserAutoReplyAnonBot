@@ -1,9 +1,12 @@
 import asyncio
+import base64
 import gc
+import ipaddress
 import json
 import random
 import re
 import signal
+import struct
 import sys
 import tempfile
 import os
@@ -11,9 +14,15 @@ from loguru import logger
 from telethon import TelegramClient, events
 from telethon.errors import FloodWaitError
 from telethon.sessions import StringSession
+from telethon.crypto import AuthKey
 
 # Initialize random seed for unpredictable responses
 random.seed()
+
+# Configure logging based on debug setting
+logger.remove()
+log_level = "DEBUG" if config.get('debug', True) else "INFO"
+logger.add(sys.stderr, level=log_level, colorize=True, enqueue=True)
 
 try:
     with open('config.json', 'r') as f:
@@ -37,8 +46,17 @@ if not config['session_string']:
 # Make triggers immutable after compilation to prevent race conditions
 immutable_triggers = {}
 for trigger_name, trigger in config['triggers'].items():
-    # Allow optional whitespace at start/end, normalize newlines
-    pattern = re.compile(r'\A\s*' + re.escape(trigger['pattern'].replace('\n', ' ')) + r'\s*\Z', re.IGNORECASE)
+    # Log pattern for debugging
+    logger.info(f"Compiling trigger {trigger_name}: {repr(trigger['pattern'])}")
+    
+    # Match pattern anywhere in the text, ignoring markdown formatting and extra text
+    # This will match even if there are __ or ** around the pattern
+    base_pattern = trigger['pattern'].replace('\n', ' ')
+    # Allow any markdown formatting around the pattern
+    pattern = re.compile(r'(?:__|\*\*)?\s*' + re.escape(base_pattern) + r'\s*(?:__|\*\*)?', re.IGNORECASE)
+    
+    logger.info(f"Compiled regex: {pattern.pattern}")
+    
     immutable_triggers[trigger_name] = {
         'pattern': trigger['pattern'],
         'action': trigger['action'],
@@ -66,21 +84,44 @@ async def send_with_backoff(client, action, max_retries=3):
     return False
 
 def register_handlers(client, track_task=None):
-    @client.on(events.NewMessage(from_users=[config['bot_username']], incoming=True, outgoing=False))
-    @client.on(events.MessageEdited(from_users=[config['bot_username']], incoming=True, outgoing=False))
+    @client.on(events.NewMessage(incoming=True, outgoing=False))
+    @client.on(events.MessageEdited(incoming=True, outgoing=False))
     async def handler(event):
         try:
+            # Only process and log messages from target bot
+            sender = await event.get_sender()
+            target_username = config['bot_username'].lstrip('@')
+            
+            # Skip if not from target bot
+            if not sender or not sender.username or sender.username.lower() != target_username.lower():
+                return
+                
+            # Debug: Log ONLY messages from target bot
+            chat = await event.get_chat()
+            logger.debug(f"RAW MESSAGE FROM @{target_username}:")
+            logger.debug(f"  Chat ID: {event.chat_id}")
+            logger.debug(f"  Raw text: {repr(event.message.text)}")
+            logger.debug(f"  Message ID: {event.message.id}")
+            
             text = event.message.text
         except AttributeError:
             # Handle messages with no text (media only) - catch HERE where the error actually occurs
+            logger.debug("Message has no text attribute")
             return
         
         # Explicitly handle empty text / None to prevent regex TypeError
         if not text:
+            logger.debug("Message text is empty or None")
             return
+            
         try:
             for trigger_name, trigger in config['triggers'].items():
-                if trigger['_compiled_pattern'].match(text):
+                logger.debug(f"Checking trigger {trigger_name} with pattern: {repr(trigger['pattern'])}")
+                logger.debug(f"Pattern regex: {trigger['_compiled_pattern'].pattern}")
+                
+                if trigger['_compiled_pattern'].search(text):
+                    logger.debug(f"✅ Trigger {trigger_name} MATCHED!")
+                    
                     if trigger['action'] == 'send_command':
                         task = asyncio.create_task(send_with_backoff(
                             client,
@@ -109,13 +150,45 @@ def register_handlers(client, track_task=None):
                             track_task(task)
                         logger.info("Replied with {resp} after {delay:.2f}s delay for trigger {name}", resp=response, delay=delay, name=trigger_name)
                     break
+                else:
+                    logger.debug(f"❌ Trigger {trigger_name} did NOT match")
         except asyncio.CancelledError:
             # Task was cancelled intentionally during shutdown/reconnect
             raise
         except Exception as e:
             logger.error(f"Error in handler: {e}")
 
-client = TelegramClient(StringSession(config['session_string']), config['api_id'], config['api_hash'])
+# Compatibility fix for old Telethon session string format
+def fix_old_session_string(session_string):
+    """Fix old session strings that contain plain text IP instead of packed bytes"""
+    try:
+        # Try normal loading first
+        return StringSession(session_string)
+    except struct.error:
+        # Old format detected - convert it
+        if len(session_string) == 369 and session_string[0] == '1':
+            # Decode the old format
+            data = base64.urlsafe_b64decode(session_string[1:] + '=' * (-len(session_string[1:]) % 4))
+            
+            # Old format: [dc_id][ip_str][port][auth_key]
+            # Find where port starts (first 2 bytes after null terminator)
+            null_pos = data.index(b'\x00')
+            dc_id = data[0]
+            ip_str = data[1:null_pos].decode('ascii')
+            port_pos = null_pos + 1
+            port = struct.unpack('>H', data[port_pos:port_pos+2])[0]
+            auth_key = data[port_pos+2:port_pos+2+256]
+            
+            # Create new properly formatted session
+            session = StringSession()
+            session.set_dc(dc_id, ip_str, port)
+            session._auth_key = AuthKey(auth_key)
+            return session
+        else:
+            # Not an old format session, let original exception propagate
+            pass
+
+client = TelegramClient(fix_old_session_string(config['session_string']), config['api_id'], config['api_hash'])
 register_handlers(client, None)
 
 shutdown_event = asyncio.Event()
@@ -234,7 +307,7 @@ async def main():
                     retry_delay = min(max(retry_delay * 2, 5), max_retry_delay)
                 
                 # Recreate client on connection failure to avoid session corruption
-                new_client = TelegramClient(StringSession(config['session_string']), config['api_id'], config['api_hash'])
+                new_client = TelegramClient(fix_old_session_string(config['session_string']), config['api_id'], config['api_hash'])
                 # Register handlers BEFORE assigning to global to prevent race condition
                 register_handlers(new_client, track_task)
                 # Atomic assignment - client is only visible globally

@@ -1,12 +1,13 @@
 {
-  "api_id": 12345,
-  "api_hash": "your_api_hash_here",
-  "phone": "+1234567890",
-  "session_string": "",
+  "api_id": 3492277,
+  "api_hash": "0891af746430cd4b49a1cb3e645cff92",
+  "phone": "+6285198268615",
+  "session_string": "1BVtsOHgBu79-cQc1krKBiMmQ1azgf8q1pJGBs135ggp0oCgASfX8AyOmxn6MPHqwx6rrVQxyS6seGup5VkuLtqk8XEuFu3IjdYJe4tbTTMKZO6cLPk39lVXrd4kffmW4oGahP4EHxqeCLfmwmBPKBbNq-SFDcKg0fu9Qh1w0GpLUY3F4m_cbOVJuVVVbnwIqeE8AOa0VZM2UXuLjf4rmYjNn7RaRlVnoR3epyt5-HRqKa_b4wZBwaoNANmYwt0vPlza0kukiE7pgdTOSxQOYY8wrxNIQkO9OKJg8FU1FPOA7ApZdkIvX-TVPDPzHbQQ5fOPaUeRiTbaVFvN65GVbF9Nf9oy-zAk=",
   "bot_username": "@chatbot",
-  "responses": ["ya", "oke", "tidak", "baik", "sip", "boleh", "iya", "tidak masalah"],
+  "responses": ["hallo, aku cwok", "aku co", "gw co", "gw cowok", "aku cwok", "cowok, selain cewek skip aja", "co"],
   "delay_min": 1,
-  "delay_max": 5,
+  "delay_max": 1,
+  "debug": true,
   "triggers": {
     "stop_chat": {"pattern": "Your partner has stopped the chat", "action": "send_command", "command": "/next"},
     "partner_found": {"pattern": "Partner found", "action": "random_response"}
