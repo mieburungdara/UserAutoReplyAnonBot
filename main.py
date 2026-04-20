@@ -216,15 +216,17 @@ async def main():
             except Exception:
                 pass
                 
-            await asyncio.sleep(retry_delay)
-            retry_delay = min(max(retry_delay * 2, 5), max_retry_delay)
-            
-            # Recreate client on connection failure to avoid session corruption
-            new_client = TelegramClient(StringSession(config['session_string']), config['api_id'], config['api_hash'])
-            # Register handlers BEFORE assigning to global to prevent race condition
-            register_handlers(new_client, track_task)
-            # Atomic assignment - client is only visible globally
-            client = new_client
+            # ONLY reconnect and increment retry delay if we are NOT shutting down
+            if not shutdown_event.is_set():
+                await asyncio.sleep(retry_delay)
+                retry_delay = min(max(retry_delay * 2, 5), max_retry_delay)
+                
+                # Recreate client on connection failure to avoid session corruption
+                new_client = TelegramClient(StringSession(config['session_string']), config['api_id'], config['api_hash'])
+                # Register handlers BEFORE assigning to global to prevent race condition
+                register_handlers(new_client, track_task)
+                # Atomic assignment - client is only visible globally
+                client = new_client
     
     logger.info("Shutting down client")
     
