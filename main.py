@@ -16,57 +16,81 @@ if not config['session_string']:
     print("Session string is empty. Run this script locally to generate the session string.")
     sys.exit(1)
 
-def register_handlers(client):
+def register_handlers(client, track_task=None):
     @client.on(events.NewMessage(from_users=[config['bot_username']], incoming=True, outgoing=False))
     @client.on(events.MessageEdited(from_users=[config['bot_username']], incoming=True, outgoing=False))
-    @client.on(events.MessageRead(func=lambda e: e.is_private))
+    @client.on(events.MessageRead(from_users=[config['bot_username']]))
     async def handler(event):
         try:
             text = event.message.text
             for trigger_name, trigger in config['triggers'].items():
-                pattern = re.compile(r'^' + re.escape(trigger['pattern']) + r'$', re.IGNORECASE | re.MULTILINE)
+                # Use \A and \Z anchors instead of ^$ to prevent line injection with MULTILINE
+                pattern = re.compile(r'\A' + re.escape(trigger['pattern']) + r'\Z', re.IGNORECASE)
                 if pattern.search(text):
+                    async def send_with_backoff(action, max_retries=3):
+                        for attempt in range(max_retries):
+                            try:
+                                await action()
+                                return True
+                            except FloodWaitError as e:
+                                logger.warning(f"Flood wait (attempt {attempt+1}): waiting {e.seconds}s")
+                                await asyncio.sleep(e.seconds)
+                        logger.error(f"Failed after {max_retries} flood wait attempts")
+                        return False
+                    
                     if trigger['action'] == 'send_command':
-                        try:
-                            await client.send_message(config['bot_username'], trigger['command'])
-                            logger.info(f"Sent {trigger['command']} for trigger {trigger_name}")
-                        except FloodWaitError as e:
-                            logger.warning(f"Flood wait: waiting {e.seconds}s")
-                            await asyncio.sleep(e.seconds)
-                            await client.send_message(config['bot_username'], trigger['command'])
+                        task = asyncio.create_task(send_with_backoff(
+                            lambda: client.send_message(config['bot_username'], trigger['command'])
+                        ))
+                        logger.info(f"Sent {trigger['command']} for trigger {trigger_name}")
                     elif trigger['action'] == 'random_response':
                         response = random.choice(config['responses'])
                         delay = random.uniform(config['delay_min'], config['delay_max'])
                         await asyncio.sleep(delay)
-                        try:
-                            await event.reply(response)
-                            logger.info(f"Replied with {response} after {delay:.2f}s delay for trigger {trigger_name}")
-                        except FloodWaitError as e:
-                            logger.warning(f"Flood wait: waiting {e.seconds}s")
-                            await asyncio.sleep(e.seconds)
-                            await event.reply(response)
+                        task = asyncio.create_task(send_with_backoff(
+                            lambda: event.reply(response)
+                        ))
+                        logger.info(f"Replied with {response} after {delay:.2f}s delay for trigger {trigger_name}")
+                    
+                    if track_task:
+                        track_task(task)
                     break
-        except AttributeError:
-            # Handle messages with no text (media only)
-            pass
+            except AttributeError:
+                # Handle messages with no text (media only)
+                pass
         except Exception as e:
             logger.error(f"Error in handler: {e}")
 
 client = TelegramClient(StringSession(config['session_string']), config['api_id'], config['api_hash'])
-register_handlers(client)
+register_handlers(client, None)
 
 shutdown_event = asyncio.Event()
+loop = None
 
 def signal_handler(signum, frame):
     logger.info(f"Received signal {signum}, shutting down gracefully")
-    shutdown_event.set()
+    if loop and loop.is_running():
+        loop.call_soon_threadsafe(shutdown_event.set)
+    else:
+        shutdown_event.set()
 
 signal.signal(signal.SIGTERM, signal_handler)
 signal.signal(signal.SIGINT, signal_handler)
 
+import tempfile
+import os
+
 async def main():
+    global loop
+    loop = asyncio.get_running_loop()
+    
     retry_delay = 5
     max_retry_delay = 300
+    running_tasks = set()
+    
+    def track_task(task):
+        running_tasks.add(task)
+        task.add_done_callback(running_tasks.discard)
     
     while not shutdown_event.is_set():
         try:
@@ -74,11 +98,15 @@ async def main():
             logger.info("Client started successfully")
             retry_delay = 5  # Reset retry delay on successful connection
             
-            # Save session string on first successful login
+            # Save session string on first successful login - ATOMIC WRITE
             if not config.get('session_string') or config['session_string'] != client.session.save():
                 config['session_string'] = client.session.save()
-                with open('config.json', 'w') as f:
+                # Atomic write pattern to prevent file corruption on termination
+                with tempfile.NamedTemporaryFile('w', dir='.', delete=False, encoding='utf-8') as f:
                     json.dump(config, f, indent=2)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(f.name, 'config.json')
                 logger.info("Session string saved to config.json")
             
             while not shutdown_event.is_set():
@@ -90,11 +118,22 @@ async def main():
                     
         except Exception as e:
             logger.error(f"Error in main: {e}, reconnecting in {retry_delay}s")
+            
+            # Cleanup old client properly
+            for task in running_tasks:
+                if not task.done():
+                    task.cancel()
+            try:
+                await client.disconnect()
+            except:
+                pass
+                
             await asyncio.sleep(retry_delay)
             retry_delay = min(retry_delay * 2, max_retry_delay)
+            
             # Recreate client on connection failure to avoid session corruption
             client = TelegramClient(StringSession(config['session_string']), config['api_id'], config['api_hash'])
-            register_handlers(client)
+            register_handlers(client, track_task)
     
     logger.info("Shutting down client")
     await client.disconnect()
