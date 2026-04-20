@@ -1,0 +1,14 @@
+{
+  "api_id": 12345,
+  "api_hash": "your_api_hash_here",
+  "phone": "+1234567890",
+  "session_string": "",
+  "bot_username": "@chatbot",
+  "responses": ["ya", "oke", "tidak", "baik", "sip", "boleh", "iya", "tidak masalah"],
+  "delay_min": 1,
+  "delay_max": 5,
+  "triggers": {
+    "stop_chat": {"pattern": "Your partner has stopped the chat", "action": "send_command", "command": "/next"},
+    "partner_found": {"pattern": "Partner found", "action": "random_response"}
+  }
+}
