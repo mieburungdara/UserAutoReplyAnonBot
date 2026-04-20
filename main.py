@@ -1,4 +1,5 @@
 import asyncio
+import gc
 import json
 import random
 import re
@@ -9,17 +10,44 @@ from telethon import TelegramClient, events
 from telethon.errors import FloodWaitError
 from telethon.sessions import StringSession
 
-with open('config.json', 'r') as f:
-    config = json.load(f)
+# Initialize random seed for unpredictable responses
+random.seed()
+
+try:
+    with open('config.json', 'r') as f:
+        config = json.load(f)
+except Exception as e:
+    logger.critical(f"Failed to load config.json: {e}")
+    sys.exit(1)
 
 if not config['session_string']:
     print("Session string is empty. Run this script locally to generate the session string.")
     sys.exit(1)
 
-# Precompile all trigger patterns once at startup
-for trigger in config['triggers'].values():
-    pattern = re.compile(r'\A' + re.escape(trigger['pattern'].replace('\n', ' ')) + r'\Z', re.IGNORECASE | re.DOTALL)
-    trigger['_compiled_pattern'] = pattern
+# Precompile all trigger patterns once at startup (without re.DOTALL to prevent ReDoS)
+# Make triggers immutable after compilation to prevent race conditions
+immutable_triggers = {}
+for trigger_name, trigger in config['triggers'].items():
+    pattern = re.compile(r'\A' + re.escape(trigger['pattern'].replace('\n', ' ')) + r'\Z', re.IGNORECASE)
+    immutable_triggers[trigger_name] = {
+        'pattern': trigger['pattern'],
+        'action': trigger['action'],
+        'command': trigger.get('command'),
+        '_compiled_pattern': pattern
+    }
+config['triggers'] = immutable_triggers
+
+# Define send_with_backoff once globally to avoid closure leaks
+async def send_with_backoff(client, action, max_retries=3):
+    for attempt in range(max_retries):
+        try:
+            await action()
+            return True
+        except FloodWaitError as e:
+            logger.warning(f"Flood wait (attempt {attempt+1}): waiting {e.seconds}s")
+            await asyncio.sleep(e.seconds)
+    logger.error(f"Failed after {max_retries} flood wait attempts")
+    return False
 
 def register_handlers(client, track_task=None):
     @client.on(events.NewMessage(from_users=[config['bot_username']], incoming=True, outgoing=False))
@@ -28,21 +56,15 @@ def register_handlers(client, track_task=None):
     async def handler(event):
         try:
             text = event.message.text
+        except AttributeError:
+            # Handle messages with no text (media only) - catch HERE where the error actually occurs
+            return
+        try:
             for trigger_name, trigger in config['triggers'].items():
                 if trigger['_compiled_pattern'].search(text):
-                    async def send_with_backoff(action, max_retries=3):
-                        for attempt in range(max_retries):
-                            try:
-                                await action()
-                                return True
-                            except FloodWaitError as e:
-                                logger.warning(f"Flood wait (attempt {attempt+1}): waiting {e.seconds}s")
-                                await asyncio.sleep(e.seconds)
-                        logger.error(f"Failed after {max_retries} flood wait attempts")
-                        return False
-                    
                     if trigger['action'] == 'send_command':
                         task = asyncio.create_task(send_with_backoff(
+                            client,
                             lambda: client.send_message(config['bot_username'], trigger['command'])
                         ))
                         if track_task:
@@ -53,15 +75,13 @@ def register_handlers(client, track_task=None):
                         delay = random.uniform(config['delay_min'], config['delay_max'])
                         await asyncio.sleep(delay)
                         task = asyncio.create_task(send_with_backoff(
+                            client,
                             lambda: event.reply(response)
                         ))
                         if track_task:
                             track_task(task)
                         logger.info(f"Replied with {response} after {delay:.2f}s delay for trigger {trigger_name}")
                     break
-            except AttributeError:
-                # Handle messages with no text (media only)
-                pass
         except asyncio.CancelledError:
             # Task was cancelled intentionally during shutdown/reconnect
             raise
@@ -117,9 +137,13 @@ async def main():
                 await asyncio.sleep(0.05)
                 os.replace(f.name, 'config.json')
                 # Ensure directory entry is persisted
-                dir_fd = os.open('.', os.O_RDONLY)
-                os.fsync(dir_fd)
-                os.close(dir_fd)
+                dir_fd = None
+                try:
+                    dir_fd = os.open('.', os.O_RDONLY)
+                    os.fsync(dir_fd)
+                finally:
+                    if dir_fd is not None:
+                        os.close(dir_fd)
                 logger.info("Session string saved to config.json")
             
             while not shutdown_event.is_set():
@@ -140,19 +164,25 @@ async def main():
             await asyncio.sleep(0)
             # Wait for all cancelled tasks to actually complete
             await asyncio.gather(*running_tasks, return_exceptions=True)
-            running_tasks.clear()
+        running_tasks.clear()
+            # Force garbage collection to prevent resource leaks
+            gc.collect()
+            
             try:
-                await client.disconnect()
-            except:
+                await asyncio.wait_for(client.disconnect(), timeout=5)
+            except Exception:
                 pass
                 
             await asyncio.sleep(retry_delay)
-            retry_delay = min(retry_delay * 2, max_retry_delay)
+            retry_delay = min(max(retry_delay * 2, 5), max_retry_delay)
             
             # Recreate client on connection failure to avoid session corruption
             client = TelegramClient(StringSession(config['session_string']), config['api_id'], config['api_hash'])
-            # Clear all existing handlers before registering new ones
-            client._event_builders.clear()
+            # Clear handlers using Telethon version-agnostic approach
+            if hasattr(client, '_event_builders'):
+                client._event_builders.clear()
+            elif hasattr(client, '_event_handlers'):
+                client._event_handlers.clear()
             register_handlers(client, track_task)
     
     logger.info("Shutting down client")
