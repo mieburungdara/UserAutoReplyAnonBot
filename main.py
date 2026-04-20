@@ -20,6 +20,13 @@ except Exception as e:
     logger.critical(f"Failed to load config.json: {e}")
     sys.exit(1)
 
+# Validate all required config keys exist
+required_keys = ['session_string', 'api_id', 'api_hash', 'bot_username', 'triggers', 'responses']
+for key in required_keys:
+    if key not in config:
+        logger.critical(f"Missing required config key: {key}")
+        sys.exit(1)
+
 if not config['session_string']:
     print("Session string is empty. Run this script locally to generate the session string.")
     sys.exit(1)
@@ -78,7 +85,7 @@ def register_handlers(client, track_task=None):
                         ))
                         if track_task:
                             track_task(task)
-                        logger.info(f"Sent {trigger['command']} for trigger {trigger_name}")
+                        logger.info("Sent {cmd} for trigger {name}", cmd=trigger['command'], name=trigger_name)
                     elif trigger['action'] == 'random_response':
                         if not config['responses']:
                             logger.warning(f"No responses configured for trigger {trigger_name}")
@@ -93,7 +100,7 @@ def register_handlers(client, track_task=None):
                         ))
                         if track_task:
                             track_task(task)
-                        logger.info(f"Replied with {response} after {delay:.2f}s delay for trigger {trigger_name}")
+                        logger.info("Replied with {resp} after {delay:.2f}s delay for trigger {name}", resp=response, delay=delay, name=trigger_name)
                     break
         except asyncio.CancelledError:
             # Task was cancelled intentionally during shutdown/reconnect
@@ -181,7 +188,8 @@ async def main():
         finally:
             # ALWAYS cleanup, regardless of whether there was an error or normal disconnect
             # Cleanup old client properly
-            for task in running_tasks:
+            # Convert to list first to avoid concurrent modification while iterating
+            for task in list(running_tasks):
                 if not task.done():
                     task.cancel()
             # Allow event loop one tick to process cancellation requests
@@ -210,12 +218,13 @@ async def main():
     
     logger.info("Shutting down client")
     
-    # Cancel all remaining running tasks before shutdown
-    for task in running_tasks:
-        if not task.done():
-            task.cancel()
-    await asyncio.gather(*running_tasks, return_exceptions=True)
-    running_tasks.clear()
+            # Cancel all remaining running tasks before shutdown
+            # Convert to list first to avoid concurrent modification while iterating
+            for task in list(running_tasks):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*running_tasks, return_exceptions=True)
+            running_tasks.clear()
     
     await client.disconnect()
     logger.info("Client disconnected successfully")
