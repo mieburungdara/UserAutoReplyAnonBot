@@ -110,7 +110,8 @@ loop = None
 def signal_handler(signum, frame):
     logger.info(f"Received signal {signum}, shutting down gracefully")
     if loop and loop.is_running():
-        loop.call_soon_threadsafe(shutdown_event.set)
+        # asyncio.Event.set() is NOT thread-safe - must call from loop thread
+        loop.call_soon_threadsafe(lambda: shutdown_event.set())
     else:
         shutdown_event.set()
 
@@ -121,7 +122,7 @@ import tempfile
 import os
 
 async def main():
-    global loop
+    global loop, client
     loop = asyncio.get_running_loop()
     
     retry_delay = 5
@@ -164,16 +165,21 @@ async def main():
             # Proper keepalive pattern that doesn't loop infinitely
             while not shutdown_event.is_set():
                 try:
+                    # Wait with timeout to allow checking shutdown_event periodically
                     await asyncio.wait_for(client.run_until_disconnected(), timeout=30)
                     # If we reach here, client actually disconnected - exit loop
                     break
                 except asyncio.TimeoutError:
+                    # Check shutdown event before continuing
+                    if shutdown_event.is_set():
+                        break
                     # Keepalive ping successful - continue running
                     continue
                     
         except Exception as e:
             logger.error(f"Error in main: {e}, reconnecting in {retry_delay}s")
-            
+        finally:
+            # ALWAYS cleanup, regardless of whether there was an error or normal disconnect
             # Cleanup old client properly
             for task in running_tasks:
                 if not task.done():
