@@ -19,7 +19,7 @@ if not config['session_string']:
 client = TelegramClient(StringSession(config['session_string']), config['api_id'], config['api_hash'])
 
 @client.on(events.NewMessage(from_users=[config['bot_username']], incoming=True))
-@client.on(events.MessageEdited(from_users=[config['bot_username']]))
+@client.on(events.MessageEdited(from_users=[config['bot_username']], incoming=True))
 @client.on(events.MessageRead(func=lambda e: e.is_private))
 async def handler(event):
     try:
@@ -70,6 +70,14 @@ async def main():
         try:
             await client.start()
             logger.info("Client started successfully")
+            retry_delay = 5  # Reset retry delay on successful connection
+            
+            # Save session string on first successful login
+            if not config.get('session_string') or config['session_string'] != client.session.save():
+                config['session_string'] = client.session.save()
+                with open('config.json', 'w') as f:
+                    json.dump(config, f, indent=2)
+                logger.info("Session string saved to config.json")
             
             while not shutdown_event.is_set():
                 try:
