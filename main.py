@@ -228,13 +228,13 @@ async def main():
     
     logger.info("Shutting down client")
     
-            # Cancel all remaining running tasks before shutdown
-            # Convert to list first to avoid concurrent modification while iterating
-            for task in list(running_tasks):
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(*running_tasks, return_exceptions=True)
-            running_tasks.clear()
+    # Cancel all remaining running tasks before shutdown
+    # Convert to list first to avoid concurrent modification while iterating
+    for task in list(running_tasks):
+        if not task.done():
+            task.cancel()
+    await asyncio.gather(*running_tasks, return_exceptions=True)
+    running_tasks.clear()
     
     await client.disconnect()
     logger.info("Client disconnected successfully")
