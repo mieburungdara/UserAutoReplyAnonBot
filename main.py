@@ -95,7 +95,10 @@ def register_handlers(client, track_task=None):
                             logger.warning(f"No responses configured for trigger {trigger_name}")
                             break
                         response = random.choice(config['responses'])
-                        delay = random.uniform(config.get('delay_min', 1), config.get('delay_max', 5))
+                        delay_min = config.get('delay_min', 1)
+                        delay_max = config.get('delay_max', 5)
+                        # Ensure min is never greater than max to prevent ValueError
+                        delay = random.uniform(min(delay_min, delay_max), max(delay_min, delay_max))
                         await asyncio.sleep(delay)
                         task = asyncio.create_task(send_with_backoff(
                             client,
