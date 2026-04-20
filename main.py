@@ -51,7 +51,9 @@ config['triggers'] = immutable_triggers
 async def send_with_backoff(client, action, max_retries=3):
     for attempt in range(max_retries):
         try:
-            return await action()
+            result = await action()
+            # Always return boolean, regardless of what action returns
+            return bool(result) is not False
         except FloodWaitError as e:
             logger.warning(f"Flood wait (attempt {attempt+1}): waiting {e.seconds}s")
             await asyncio.sleep(e.seconds)
@@ -141,6 +143,7 @@ async def main():
         task.add_done_callback(lambda t: running_tasks.discard(t))
     
     while not shutdown_event.is_set():
+        had_error = False
         try:
             await client.start()
             logger.info("Client started successfully")
@@ -196,6 +199,9 @@ async def main():
                     
         except Exception as e:
             logger.error(f"Error in main: {e}, reconnecting in {retry_delay}s")
+            had_error = True
+        else:
+            had_error = False
         finally:
             # ALWAYS cleanup, regardless of whether there was an error or normal disconnect
             # Cleanup old client properly
@@ -219,7 +225,10 @@ async def main():
             # ONLY reconnect and increment retry delay if we are NOT shutting down
             if not shutdown_event.is_set():
                 await asyncio.sleep(retry_delay)
-                retry_delay = min(max(retry_delay * 2, 5), max_retry_delay)
+                
+                # ONLY increment retry delay if there was an actual error
+                if had_error:
+                    retry_delay = min(max(retry_delay * 2, 5), max_retry_delay)
                 
                 # Recreate client on connection failure to avoid session corruption
                 new_client = TelegramClient(StringSession(config['session_string']), config['api_id'], config['api_hash'])
