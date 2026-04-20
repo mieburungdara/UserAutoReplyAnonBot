@@ -160,7 +160,7 @@ async def main():
                         os.fsync(f.fileno())
                     # Small forced delay to ensure disk cache is committed
                     await asyncio.sleep(0.05)
-                    os.replace(f.name, 'config.json')
+                    os.replace(temp_file, 'config.json')
                     # Ensure directory entry is persisted
                     dir_fd = None
                     try:
