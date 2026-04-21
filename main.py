@@ -19,17 +19,22 @@ from telethon.crypto import AuthKey
 # Initialize random seed for unpredictable responses
 random.seed()
 
-# Configure logging based on debug setting
-logger.remove()
-log_level = "DEBUG" if config.get('debug', True) else "INFO"
-logger.add(sys.stderr, level=log_level, colorize=True, enqueue=True)
-
+config = None
 try:
     with open('config.json', 'r') as f:
         config = json.load(f)
 except Exception as e:
-    logger.critical(f"Failed to load config.json: {e}")
+    print(f"Failed to load config.json: {e}")
     sys.exit(1)
+
+if config is None:
+    print("Config failed to load correctly")
+    sys.exit(1)
+
+# Configure logging based on debug setting
+logger.remove()
+log_level = "DEBUG" if config.get('debug', True) else "INFO"
+logger.add(sys.stderr, level=log_level, colorize=True, enqueue=True)
 
 # Validate all required config keys exist
 required_keys = ['session_string', 'api_id', 'api_hash', 'bot_username', 'triggers', 'responses']
@@ -144,7 +149,7 @@ def register_handlers(client, track_task=None):
                         task = asyncio.create_task(send_with_backoff(
                             client,
                             # Bind values immediately with default parameter to avoid closure late binding
-                            lambda evt=event, resp=response: evt.reply(resp)
+                            lambda evt=event, resp=response: client.send_message(evt.chat_id, resp)
                         ))
                         if track_task:
                             track_task(task)
@@ -259,19 +264,22 @@ async def main():
                             pass
                     logger.error(f"Failed to save session string: {e}")
             
-            # Proper keepalive pattern that doesn't loop infinitely
+            # Proper keepalive pattern - just run until disconnected without artificial timeouts
+            # Telethon handles its own connection keepalive internally
             while not shutdown_event.is_set():
                 try:
-                    # Wait with timeout to allow checking shutdown_event periodically
-                    await asyncio.wait_for(client.run_until_disconnected(), timeout=30)
+                    # Simply run until the client disconnects naturally
+                    # No artificial 30-second timeout that can cause false disconnects
+                    await client.run_until_disconnected()
                     # If we reach here, client actually disconnected - exit loop
                     break
-                except asyncio.TimeoutError:
-                    # Check shutdown event before continuing
+                except Exception as e:
+                    logger.warning(f"Connection interrupted: {e}")
+                    # Check if we're shutting down
                     if shutdown_event.is_set():
                         break
-                    # Keepalive ping successful - continue running
-                    continue
+                    # Otherwise continue and let the outer loop handle reconnection
+                    break
                     
         except Exception as e:
             logger.error(f"Error in main: {e}, reconnecting in {retry_delay}s")

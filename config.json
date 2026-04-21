@@ -6,8 +6,8 @@
   "bot_username": "@chatbot",
   "responses": ["hallo, aku cwok", "aku co", "gw co", "gw cowok", "aku cwok", "cowok, selain cewek skip aja", "co"],
   "delay_min": 1,
-  "delay_max": 1,
-  "debug": true,
+  "delay_max": 1.5,
+  "debug": false,
   "triggers": {
     "stop_chat": {"pattern": "Your partner has stopped the chat", "action": "send_command", "command": "/next"},
     "partner_found": {"pattern": "Partner found", "action": "random_response"}
